@@ -74,42 +74,79 @@ The system uses the **Haversine formula** to calculate the great-circle distance
 - **Delivery State Machine**: Prevents invalid transitions. Deliveries must follow: CREATED -> ASSIGNED -> PICKED_UP -> IN_TRANSIT -> DELIVERED.
 - **Assignments**: A vehicle cannot be assigned to a new delivery if it is not `AVAILABLE` or lacks an `ACTIVE` driver.
 - **Location Updates**: Updating a vehicle's location automatically records a point-in-time snapshot in `LocationHistory`.
+- **Registration**: New accounts default to `DISPATCHER`. An `ADMIN` account can only be created by an authenticated admin, except the very first account, which bootstraps the system.
 
-## Running Locally
+## API Endpoints
 
-1. Ensure Java 21 and Maven are installed.
-2. Ensure Docker is running.
-3. Start the MySQL database:
-   ```bash
-   docker-compose up -d
-   ```
-4. Run the Spring Boot application:
-   ```bash
-   mvn spring-boot:run
-   ```
+All endpoints except `/api/auth/**` and Swagger require an `Authorization: Bearer <token>` header.
 
-## Docker
-
-To run the entire stack (App + DB) via Docker:
-```bash
-docker build -t fleettrack-app .
-# Add an app service to docker-compose.yml and run:
-docker-compose up
-```
-
-## Testing
-
-Run tests using Maven:
-```bash
-mvn clean test
-```
+| Method | Endpoint | Access |
+|---|---|---|
+| POST | `/api/auth/register`, `/api/auth/login` | Public |
+| GET, POST | `/api/vehicles` | ADMIN, DISPATCHER |
+| GET, PATCH, DELETE | `/api/vehicles/{id}` | ADMIN, DISPATCHER |
+| PATCH | `/api/vehicles/{id}/location` | ADMIN, DISPATCHER |
+| GET | `/api/vehicles/nearby?latitude=&longitude=&radiusKm=10` | ADMIN, DISPATCHER |
+| GET, POST | `/api/drivers` | ADMIN |
+| GET, PATCH, DELETE | `/api/drivers/{id}` | ADMIN |
+| PATCH | `/api/drivers/{driverId}/assign-vehicle/{vehicleId}` | ADMIN |
+| GET, POST | `/api/deliveries` | ADMIN, DISPATCHER |
+| GET | `/api/deliveries/{id}` | ADMIN, DISPATCHER |
+| PATCH | `/api/deliveries/{id}/assign`, `/api/deliveries/{id}/status` | ADMIN, DISPATCHER |
+| GET, POST | `/api/customers`, GET `/api/customers/{id}` | Any authenticated user |
 
 ## Environment Variables
 
-- `DB_URL` (default: jdbc:mysql://localhost:3306/fleettrack?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true)
-- `DB_USERNAME` (default: fleettrack_user)
-- `DB_PASSWORD` (default: fleettrack_pass)
-- `JWT_SECRET` (default: predefined 256-bit hex secret)
+The application has **no built-in defaults** for credentials; every variable below must be set. Copy `local.env.example` to `local.env` (git-ignored) and fill in your values.
+
+| Variable | Used by | Example |
+|---|---|---|
+| `DB_URL` | App | `jdbc:mysql://localhost:3306/fleettrack?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true` |
+| `DB_USERNAME` | App | `fleettrack_user` |
+| `DB_PASSWORD` | App | your database password |
+| `JWT_SECRET` | App | Base64-encoded secret of at least 256 bits (`openssl rand -base64 32`) |
+| `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD` | docker-compose (MySQL) | match `DB_USERNAME` / `DB_PASSWORD` |
+
+## Running Locally
+
+1. Install Java 21 and Docker (Maven is optional; the wrapper `mvnw` is included).
+2. Create your env file:
+   ```bash
+   cp local.env.example local.env   # then edit the values
+   ```
+3. Start MySQL:
+   ```bash
+   docker compose --env-file local.env up -d
+   ```
+4. Export the variables from `local.env` and run the app (Flyway creates the schema on first start):
+   ```bash
+   # bash
+   export $(grep -v '^#' local.env | xargs)
+   ./mvnw spring-boot:run
+
+   # PowerShell
+   Get-Content local.env | Where-Object { $_ -and $_ -notmatch '^#' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+   .\mvnw.cmd spring-boot:run
+   ```
+5. Open Swagger UI at `http://localhost:8080/swagger-ui.html`, register a user, log in, and use the returned token.
+
+## Docker
+
+The `Dockerfile` packages the built JAR; `docker-compose.yml` currently runs only the MySQL database.
+```bash
+./mvnw clean package -DskipTests
+docker build -t fleettrack-app .
+docker run --env-file local.env -p 8080:8080 fleettrack-app
+```
+When the app runs in a container, point `DB_URL` at the database host reachable from the container (for example `host.docker.internal`).
+
+## Testing
+
+Unit tests use JUnit 5 and Mockito (no database needed):
+```bash
+./mvnw clean test
+```
+They cover the Haversine calculator, the nearby-vehicle search (radius filtering, availability filtering, sorting by distance) and the registration role rules.
 
 ## Future Scalability
 

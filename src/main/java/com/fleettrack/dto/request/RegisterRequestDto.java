@@ -2,7 +2,6 @@ package com.fleettrack.dto.request;
 
 import com.fleettrack.entity.enums.UserRole;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
 @Data
@@ -11,6 +10,6 @@ public class RegisterRequestDto {
     private String username;
     @NotBlank
     private String password;
-    @NotNull
+    // Optional; defaults to DISPATCHER. ADMIN requires an admin caller (or no users yet)
     private UserRole role;
 }
