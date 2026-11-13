@@ -2,21 +2,27 @@ package com.fleettrack.controller;
 
 import com.fleettrack.dto.request.LocationUpdateRequestDto;
 import com.fleettrack.dto.request.VehicleRequestDto;
+import com.fleettrack.dto.request.VehicleUpdateRequestDto;
+import com.fleettrack.dto.response.LocationHistoryResponseDto;
 import com.fleettrack.dto.response.NearbyVehicleResponseDto;
 import com.fleettrack.dto.response.VehicleResponseDto;
 import com.fleettrack.service.VehicleService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Positive;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Tag(name = "Vehicles", description = "Fleet vehicle management")
@@ -30,11 +36,11 @@ public class VehicleController {
 
     @Operation(summary = "List all vehicles (paginated)")
     @GetMapping
-    public Page<VehicleResponseDto> getVehicles(Pageable pageable) {
+    public Page<VehicleResponseDto> getVehicles(@PageableDefault(size = 20, sort = "id") Pageable pageable) {
         return vehicleService.getVehicles(pageable);
     }
 
-    @Operation(summary = "Create a new vehicle")
+    @Operation(summary = "Create a new vehicle (status defaults to AVAILABLE)")
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public VehicleResponseDto createVehicle(@Valid @RequestBody VehicleRequestDto request) {
@@ -47,13 +53,13 @@ public class VehicleController {
         return vehicleService.getVehicle(id);
     }
 
-    @Operation(summary = "Update vehicle details")
+    @Operation(summary = "Partially update a vehicle (registration, type, AVAILABLE/OFFLINE status)")
     @PatchMapping("/{id}")
-    public VehicleResponseDto updateVehicle(@PathVariable Long id, @Valid @RequestBody VehicleRequestDto request) {
+    public VehicleResponseDto updateVehicle(@PathVariable Long id, @Valid @RequestBody VehicleUpdateRequestDto request) {
         return vehicleService.updateVehicle(id, request);
     }
 
-    @Operation(summary = "Soft-delete (deactivate) a vehicle")
+    @Operation(summary = "Soft-delete (deactivate) a vehicle and release its driver")
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deleteVehicle(@PathVariable Long id) {
@@ -67,12 +73,22 @@ public class VehicleController {
         return vehicleService.updateLocation(id, request);
     }
 
-    @Operation(summary = "Find nearby AVAILABLE vehicles by Haversine formula")
+    @Operation(summary = "Location history of a vehicle, newest first (optional ISO-8601 from/to window)")
+    @GetMapping("/{id}/locations")
+    public Page<LocationHistoryResponseDto> getLocationHistory(
+            @PathVariable Long id,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime to,
+            @PageableDefault(size = 50) Pageable pageable) {
+        return vehicleService.getLocationHistory(id, from, to, pageable);
+    }
+
+    @Operation(summary = "Find nearby AVAILABLE vehicles by Haversine distance, nearest first")
     @GetMapping("/nearby")
     public List<NearbyVehicleResponseDto> getNearbyVehicles(
-            @RequestParam @Min(-90) @Max(90) double latitude,
-            @RequestParam @Min(-180) @Max(180) double longitude,
-            @RequestParam(defaultValue = "10.0") double radiusKm) {
+            @RequestParam @DecimalMin("-90") @DecimalMax("90") double latitude,
+            @RequestParam @DecimalMin("-180") @DecimalMax("180") double longitude,
+            @RequestParam(defaultValue = "10.0") @Positive @DecimalMax("500") double radiusKm) {
         return vehicleService.findNearbyVehicles(latitude, longitude, radiusKm);
     }
 }

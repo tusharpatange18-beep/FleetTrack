@@ -1,9 +1,11 @@
 package com.fleettrack.config;
 
 import com.fleettrack.security.JwtAuthenticationFilter;
+import com.fleettrack.security.RestSecurityErrorHandler;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -25,23 +27,32 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 @RequiredArgsConstructor
 public class SecurityConfig {
 
+    private static final String ADMIN = "ADMIN";
+    private static final String DISPATCHER = "DISPATCHER";
+
     private final JwtAuthenticationFilter jwtAuthFilter;
     private final UserDetailsService userDetailsService;
+    private final RestSecurityErrorHandler securityErrorHandler;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
+            // Stateless JWT API: no cookies, so CSRF protection is not needed
             .csrf(AbstractHttpConfigurer::disable)
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/**", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
-                .requestMatchers("/api/vehicles/**").hasAnyAuthority("ADMIN", "DISPATCHER")
-                .requestMatchers("/api/drivers/**").hasAuthority("ADMIN")
-                .requestMatchers("/api/deliveries/**").hasAnyAuthority("ADMIN", "DISPATCHER")
+                .requestMatchers("/api/auth/**", "/error").permitAll()
+                .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                // Drivers are managed by admins; dispatchers may read them to plan assignments
+                .requestMatchers(HttpMethod.GET, "/api/drivers/**").hasAnyAuthority(ADMIN, DISPATCHER)
+                .requestMatchers("/api/drivers/**").hasAuthority(ADMIN)
+                .requestMatchers("/api/vehicles/**", "/api/deliveries/**", "/api/customers/**")
+                    .hasAnyAuthority(ADMIN, DISPATCHER)
                 .anyRequest().authenticated()
             )
-            .sessionManagement(session -> session
-                .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-            )
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint(securityErrorHandler)
+                .accessDeniedHandler(securityErrorHandler))
             .authenticationProvider(authenticationProvider())
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 

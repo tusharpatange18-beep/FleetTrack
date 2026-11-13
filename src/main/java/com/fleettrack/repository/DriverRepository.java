@@ -6,4 +6,8 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public interface DriverRepository extends JpaRepository<Driver, Long> {
+
+    boolean existsByPhone(String phone);
+
+    boolean existsByLicenseNumber(String licenseNumber);
 }

@@ -4,9 +4,16 @@ import com.fleettrack.entity.enums.VehicleStatus;
 import com.fleettrack.entity.enums.VehicleType;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.DynamicUpdate;
 import java.time.LocalDateTime;
 
+/*
+ * @DynamicUpdate: UPDATE statements contain only the columns that changed. Location pings are
+ * frequent and not row-locked; without this, a ping that loaded the vehicle before an assignment
+ * committed would write the old status back (a lost update).
+ */
 @Entity
+@DynamicUpdate
 @Table(name = "vehicle")
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
 public class Vehicle {
