@@ -86,7 +86,15 @@ class SecurityAndErrorHandlingTest extends IntegrationTestSupport {
         String token = adminToken();
         postJson(token, "/api/vehicles", "{not json").andExpect(status().isBadRequest());
         postJson(token, "/api/vehicles", Map.of("registrationNumber", "MH01", "type", "SPACESHIP"))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("type: invalid value 'SPACESHIP'; allowed values: BIKE, VAN, TRUCK"));
+    }
+
+    @Test
+    void enumValuesAreCaseInsensitive() throws Exception {
+        postJson(adminToken(), "/api/vehicles", Map.of("registrationNumber", "MH01CASE01", "type", "Van"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.type").value("VAN"));
     }
 
     @Test

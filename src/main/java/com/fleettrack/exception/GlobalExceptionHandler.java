@@ -1,5 +1,6 @@
 package com.fleettrack.exception;
 
+import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
@@ -21,6 +22,7 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.util.Arrays;
 import java.util.stream.Collectors;
 
 /**
@@ -82,7 +84,19 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiError> handleUnreadable(HttpMessageNotReadableException ex, HttpServletRequest request) {
-        return build(HttpStatus.BAD_REQUEST, "Malformed JSON body or invalid field value", request);
+        // Name the offending field, and list the allowed values when it is an enum
+        if (ex.getCause() instanceof InvalidFormatException ife && !ife.getPath().isEmpty()) {
+            String field = ife.getPath().stream()
+                    .map(ref -> ref.getFieldName() != null ? ref.getFieldName() : "[" + ref.getIndex() + "]")
+                    .collect(Collectors.joining("."));
+            Class<?> target = ife.getTargetType();
+            String message = target != null && target.isEnum()
+                    ? field + ": invalid value '" + ife.getValue() + "'; allowed values: "
+                        + Arrays.stream(target.getEnumConstants()).map(Object::toString).collect(Collectors.joining(", "))
+                    : field + ": invalid value '" + ife.getValue() + "'";
+            return build(HttpStatus.BAD_REQUEST, message, request);
+        }
+        return build(HttpStatus.BAD_REQUEST, "Malformed JSON body", request);
     }
 
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
