@@ -3,9 +3,12 @@ package com.fleettrack.entity;
 import com.fleettrack.entity.enums.DeliveryStatus;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.DynamicUpdate;
+
 import java.time.LocalDateTime;
 
 @Entity
+@DynamicUpdate
 @Table(name = "delivery")
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
 public class Delivery {
@@ -28,6 +31,12 @@ public class Delivery {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private DeliveryStatus status;
+
+    /** Route of this trip; defaults to the customer's addresses when the request omits it. */
+    private Double pickupLatitude;
+    private Double pickupLongitude;
+    private Double dropLatitude;
+    private Double dropLongitude;
 
     @Column(name = "created_at", insertable = false, updatable = false)
     private LocalDateTime createdAt;

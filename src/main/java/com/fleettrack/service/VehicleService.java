@@ -15,7 +15,6 @@ import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.VehicleMapper;
 import com.fleettrack.repository.LocationHistoryRepository;
 import com.fleettrack.repository.VehicleRepository;
-import com.fleettrack.util.HaversineCalculator;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,8 +23,8 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.LocalDateTime;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 
@@ -42,6 +41,8 @@ public class VehicleService {
     private final VehicleRepository vehicleRepository;
     private final LocationHistoryRepository locationHistoryRepository;
     private final VehicleMapper vehicleMapper;
+    private final ProximitySearch proximitySearch;
+    private final Clock clock;
 
     public Page<VehicleResponseDto> getVehicles(Pageable pageable) {
         return vehicleRepository.findAll(pageable).map(vehicleMapper::toDto);
@@ -114,7 +115,7 @@ public class VehicleService {
         if (vehicle.getStatus() == VehicleStatus.INACTIVE) {
             throw new ConflictException("Vehicle is deactivated");
         }
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(clock);
         vehicle.setCurrentLatitude(requestDto.getLatitude());
         vehicle.setCurrentLongitude(requestDto.getLongitude());
         vehicle.setLocationUpdatedAt(now);
@@ -134,7 +135,7 @@ public class VehicleService {
     public Page<LocationHistoryResponseDto> getLocationHistory(Long id, LocalDateTime from, LocalDateTime to, Pageable pageable) {
         findVehicleById(id); // 404 for unknown vehicles instead of an empty page
         LocalDateTime start = from != null ? from : LocalDateTime.of(1970, 1, 1, 0, 0);
-        LocalDateTime end = to != null ? to : LocalDateTime.now().plusMinutes(1);
+        LocalDateTime end = to != null ? to : LocalDateTime.now(clock).plusMinutes(1);
         if (start.isAfter(end)) {
             throw new BadRequestException("'from' must not be after 'to'");
         }
@@ -159,23 +160,21 @@ public class VehicleService {
     }
 
     /**
-     * Finds AVAILABLE vehicles within radiusKm using the Haversine formula, nearest first.
+     * AVAILABLE vehicles with a fresh location within radiusKm, nearest first.
+     * See {@link ProximitySearch} for the bounding-box + Haversine approach.
      */
     public List<NearbyVehicleResponseDto> findNearbyVehicles(double lat, double lon, double radiusKm) {
-        return vehicleRepository.findByStatus(VehicleStatus.AVAILABLE).stream()
-            .filter(v -> v.getCurrentLatitude() != null && v.getCurrentLongitude() != null)
-            .map(v -> {
-                double dist = HaversineCalculator.calculateDistance(lat, lon,
-                        v.getCurrentLatitude(), v.getCurrentLongitude());
+        return proximitySearch.nearestAvailable(lat, lon, radiusKm, false).stream()
+            .map(c -> {
                 NearbyVehicleResponseDto dto = new NearbyVehicleResponseDto();
-                dto.setVehicleId(v.getId());
-                dto.setRegistrationNumber(v.getRegistrationNumber());
-                dto.setType(v.getType().name());
-                dto.setDistanceKm(Math.round(dist * 100.0) / 100.0);
+                dto.setVehicleId(c.vehicle().id());
+                dto.setRegistrationNumber(c.vehicle().registrationNumber());
+                dto.setType(c.vehicle().type().name());
+                dto.setDistanceKm(Math.round(c.distanceKm() * 100.0) / 100.0);
+                dto.setDriverId(c.vehicle().driverId());
+                dto.setLocationUpdatedAt(c.vehicle().locationUpdatedAt());
                 return dto;
             })
-            .filter(dto -> dto.getDistanceKm() <= radiusKm)
-            .sorted(Comparator.comparingDouble(NearbyVehicleResponseDto::getDistanceKm))
             .toList();
     }
 

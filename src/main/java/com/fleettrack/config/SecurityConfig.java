@@ -45,7 +45,7 @@ public class SecurityConfig {
                 // Drivers are managed by admins; dispatchers may read them to plan assignments
                 .requestMatchers(HttpMethod.GET, "/api/drivers/**").hasAnyAuthority(ADMIN, DISPATCHER)
                 .requestMatchers("/api/drivers/**").hasAuthority(ADMIN)
-                .requestMatchers("/api/vehicles/**", "/api/deliveries/**", "/api/customers/**")
+                .requestMatchers("/api/vehicles/**", "/api/deliveries/**", "/api/customers/**", "/api/dashboard/**")
                     .hasAnyAuthority(ADMIN, DISPATCHER)
                 .anyRequest().authenticated()
             )

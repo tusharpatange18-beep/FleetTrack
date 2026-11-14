@@ -1,21 +1,23 @@
 package com.fleettrack.service;
 
-import com.fleettrack.dto.response.NearbyVehicleResponseDto;
+import com.fleettrack.dto.request.VehicleRequestDto;
+import com.fleettrack.dto.request.VehicleUpdateRequestDto;
+import com.fleettrack.entity.Driver;
 import com.fleettrack.entity.Vehicle;
 import com.fleettrack.entity.enums.VehicleStatus;
 import com.fleettrack.entity.enums.VehicleType;
+import com.fleettrack.exception.BadRequestException;
 import com.fleettrack.exception.ConflictException;
+import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.VehicleMapper;
 import com.fleettrack.repository.LocationHistoryRepository;
 import com.fleettrack.repository.VehicleRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
-import java.util.Arrays;
-import java.util.List;
+import java.time.Clock;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -24,107 +26,103 @@ import static org.mockito.Mockito.*;
 
 class VehicleServiceTest {
 
-    @Mock
     private VehicleRepository vehicleRepository;
-
-    @Mock
-    private LocationHistoryRepository locationHistoryRepository;
-
-    @Mock
-    private VehicleMapper vehicleMapper;
-
-    @InjectMocks
     private VehicleService vehicleService;
 
     @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
-    }
-
-    @Test
-    void nearbySearch_onlyReturnsAvailableVehicles() {
-        Vehicle available = makeVehicle(1L, VehicleStatus.AVAILABLE, VehicleType.VAN, 19.0760, 72.8777);
-        Vehicle busy = makeVehicle(2L, VehicleStatus.BUSY, VehicleType.BIKE, 19.0760, 72.8777);
-        Vehicle offline = makeVehicle(3L, VehicleStatus.OFFLINE, VehicleType.TRUCK, 19.0760, 72.8777);
-
-        when(vehicleRepository.findByStatus(VehicleStatus.AVAILABLE)).thenReturn(List.of(available));
-
-        List<NearbyVehicleResponseDto> result = vehicleService.findNearbyVehicles(19.0760, 72.8777, 10.0);
-
-        assertEquals(1, result.size());
-        assertEquals(1L, result.get(0).getVehicleId());
-        verify(vehicleRepository, never()).findAll(); // Must use filtered query, not findAll
-    }
-
-    @Test
-    void nearbySearch_excludesVehiclesOutsideRadius() {
-        // Vehicle in Mumbai
-        Vehicle mumbai = makeVehicle(1L, VehicleStatus.AVAILABLE, VehicleType.VAN, 19.0760, 72.8777);
-        // Vehicle in Delhi (~1400 km away)
-        Vehicle delhi = makeVehicle(2L, VehicleStatus.AVAILABLE, VehicleType.TRUCK, 28.7041, 77.1025);
-
-        when(vehicleRepository.findByStatus(VehicleStatus.AVAILABLE)).thenReturn(List.of(mumbai, delhi));
-
-        // Search from Mumbai with 10 km radius
-        List<NearbyVehicleResponseDto> result = vehicleService.findNearbyVehicles(19.0760, 72.8777, 10.0);
-
-        assertEquals(1, result.size());
-        assertEquals(1L, result.get(0).getVehicleId());
-    }
-
-    @Test
-    void nearbySearch_sortsByDistanceAscending() {
-        // Closer vehicle (~2 km away from search point)
-        Vehicle closer = makeVehicle(1L, VehicleStatus.AVAILABLE, VehicleType.VAN, 19.0760, 72.8777);
-        // Further vehicle (~5 km away from search point)
-        Vehicle further = makeVehicle(2L, VehicleStatus.AVAILABLE, VehicleType.BIKE, 19.1100, 72.8777);
-
-        when(vehicleRepository.findByStatus(VehicleStatus.AVAILABLE)).thenReturn(List.of(further, closer));
-
-        List<NearbyVehicleResponseDto> result = vehicleService.findNearbyVehicles(19.0760, 72.8777, 20.0);
-
-        assertEquals(2, result.size());
-        assertTrue(result.get(0).getDistanceKm() <= result.get(1).getDistanceKm(),
-                "Results should be sorted by distance ascending");
-    }
-
-    @Test
-    void nearbySearch_excludesVehiclesWithNullLocation() {
-        Vehicle noLocation = makeVehicle(1L, VehicleStatus.AVAILABLE, VehicleType.VAN, null, null);
-        when(vehicleRepository.findByStatus(VehicleStatus.AVAILABLE)).thenReturn(List.of(noLocation));
-
-        List<NearbyVehicleResponseDto> result = vehicleService.findNearbyVehicles(19.0760, 72.8777, 100.0);
-
-        assertEquals(0, result.size());
+        vehicleRepository = mock(VehicleRepository.class);
+        vehicleService = new VehicleService(vehicleRepository, mock(LocationHistoryRepository.class),
+                new VehicleMapper(), mock(ProximitySearch.class), Clock.systemUTC());
     }
 
     @Test
     void createVehicle_duplicateRegistrationThrowsConflict() {
         when(vehicleRepository.existsByRegistrationNumber("MH01AB1234")).thenReturn(true);
+        assertThrows(ConflictException.class, () -> vehicleService.createVehicle(createRequest("MH01AB1234", null)));
+    }
 
-        com.fleettrack.dto.request.VehicleRequestDto request = new com.fleettrack.dto.request.VehicleRequestDto();
-        request.setRegistrationNumber("MH01AB1234");
-        request.setType(VehicleType.VAN);
-        request.setStatus(VehicleStatus.AVAILABLE);
+    @Test
+    void createVehicle_defaultsToAvailable() {
+        when(vehicleRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        assertEquals("AVAILABLE", vehicleService.createVehicle(createRequest(" MH01AB1234 ", null)).getStatus());
+    }
 
-        assertThrows(ConflictException.class, () -> vehicleService.createVehicle(request));
+    @ParameterizedTest
+    @EnumSource(value = VehicleStatus.class, names = {"BUSY", "INACTIVE"})
+    void createVehicle_rejectsSystemOwnedStatuses(VehicleStatus status) {
+        assertThrows(BadRequestException.class, () -> vehicleService.createVehicle(createRequest("MH01", status)));
+        verify(vehicleRepository, never()).save(any());
     }
 
     @Test
     void getVehicle_notFoundThrowsResourceNotFoundException() {
         when(vehicleRepository.findById(999L)).thenReturn(Optional.empty());
-        assertThrows(com.fleettrack.exception.ResourceNotFoundException.class, () -> vehicleService.getVehicle(999L));
+        assertThrows(ResourceNotFoundException.class, () -> vehicleService.getVehicle(999L));
     }
 
-    // Helper
-    private Vehicle makeVehicle(Long id, VehicleStatus status, VehicleType type, Double lat, Double lon) {
+    @Test
+    void updateVehicle_onlyChangesFieldsThatAreSent() {
+        Vehicle vehicle = vehicle(VehicleStatus.AVAILABLE);
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle));
+
+        VehicleUpdateRequestDto request = new VehicleUpdateRequestDto();
+        request.setType(VehicleType.TRUCK);
+        vehicleService.updateVehicle(1L, request);
+
+        assertEquals(VehicleType.TRUCK, vehicle.getType());
+        assertEquals("REG-1", vehicle.getRegistrationNumber());
+        assertEquals(VehicleStatus.AVAILABLE, vehicle.getStatus());
+    }
+
+    @Test
+    void updateVehicle_cannotChangeStatusWhileBusy() {
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle(VehicleStatus.BUSY)));
+        VehicleUpdateRequestDto request = new VehicleUpdateRequestDto();
+        request.setStatus(VehicleStatus.OFFLINE);
+        assertThrows(ConflictException.class, () -> vehicleService.updateVehicle(1L, request));
+    }
+
+    @Test
+    void updateVehicle_blankRegistrationIsRejected() {
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle(VehicleStatus.AVAILABLE)));
+        VehicleUpdateRequestDto request = new VehicleUpdateRequestDto();
+        request.setRegistrationNumber("   ");
+        assertThrows(BadRequestException.class, () -> vehicleService.updateVehicle(1L, request));
+    }
+
+    @Test
+    void deleteVehicle_deactivatesAndReleasesDriver() {
+        Vehicle vehicle = vehicle(VehicleStatus.AVAILABLE);
+        vehicle.setDriver(new Driver());
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle));
+
+        vehicleService.deleteVehicle(1L);
+
+        assertEquals(VehicleStatus.INACTIVE, vehicle.getStatus());
+        assertNull(vehicle.getDriver());
+    }
+
+    @Test
+    void deleteVehicle_refusedDuringDelivery() {
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle(VehicleStatus.BUSY)));
+        assertThrows(ConflictException.class, () -> vehicleService.deleteVehicle(1L));
+    }
+
+    private static VehicleRequestDto createRequest(String registration, VehicleStatus status) {
+        VehicleRequestDto request = new VehicleRequestDto();
+        request.setRegistrationNumber(registration);
+        request.setType(VehicleType.VAN);
+        request.setStatus(status);
+        return request;
+    }
+
+    private static Vehicle vehicle(VehicleStatus status) {
         Vehicle v = new Vehicle();
-        v.setId(id);
+        v.setId(1L);
+        v.setRegistrationNumber("REG-1");
+        v.setType(VehicleType.VAN);
         v.setStatus(status);
-        v.setType(type);
-        v.setCurrentLatitude(lat);
-        v.setCurrentLongitude(lon);
-        v.setRegistrationNumber("REG-" + id);
         return v;
     }
 }

@@ -82,6 +82,41 @@ class ConcurrencyTest extends IntegrationTestSupport {
     }
 
     /**
+     * N deliveries auto-assigned in parallel with N vehicles in range: every delivery must get
+     * a vehicle and no vehicle may be used twice. Threads whose nearest candidate was just taken
+     * must fall through to the next one instead of failing or double-booking.
+     */
+    @Test
+    void parallelAutoAssignments_neverShareAVehicle() throws Exception {
+        int n = 4;
+        for (int i = 0; i < n; i++) {
+            readyVehicle("MH12AUTO0" + i, "900000010" + i, "LIC-AUTO-" + i, 19.0 + i * 0.001);
+        }
+        List<Long> deliveryIds = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            deliveryIds.add(newDelivery().getId());
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(n);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Long>> futures = new ArrayList<>();
+        for (Long deliveryId : deliveryIds) {
+            futures.add(pool.submit(() -> {
+                start.await();
+                return deliveryService.autoAssign(deliveryId, 10.0).delivery().getVehicleId();
+            }));
+        }
+        start.countDown();
+        java.util.Set<Long> usedVehicles = new java.util.HashSet<>();
+        for (Future<Long> f : futures) {
+            usedVehicles.add(f.get(30, TimeUnit.SECONDS));
+        }
+        pool.shutdown();
+
+        assertEquals(n, usedVehicles.size(), "each delivery must get a different vehicle");
+    }
+
+    /**
      * A location ping loads the vehicle (AVAILABLE); before it commits, an assignment marks the
      * vehicle BUSY and commits. Without @DynamicUpdate the ping's UPDATE would rewrite every
      * column and put the status back to AVAILABLE.
@@ -112,19 +147,23 @@ class ConcurrencyTest extends IntegrationTestSupport {
     }
 
     private Vehicle readyVehicle() {
+        return readyVehicle("MH12RACE01", "9000000001", "LIC-RACE", 19.0);
+    }
+
+    private Vehicle readyVehicle(String registration, String phone, String license, double lat) {
         Driver driver = new Driver();
-        driver.setName("Ravi");
-        driver.setPhone("9000000001");
-        driver.setLicenseNumber("LIC-RACE");
+        driver.setName("Driver " + phone);
+        driver.setPhone(phone);
+        driver.setLicenseNumber(license);
         driver.setStatus(DriverStatus.ACTIVE);
         driverRepository.save(driver);
 
         Vehicle vehicle = new Vehicle();
-        vehicle.setRegistrationNumber("MH12RACE01");
+        vehicle.setRegistrationNumber(registration);
         vehicle.setType(VehicleType.VAN);
         vehicle.setStatus(VehicleStatus.AVAILABLE);
         vehicle.setDriver(driver);
-        vehicle.setCurrentLatitude(19.0);
+        vehicle.setCurrentLatitude(lat);
         vehicle.setCurrentLongitude(73.0);
         vehicle.setLocationUpdatedAt(LocalDateTime.now());
         return vehicleRepository.save(vehicle);
@@ -143,6 +182,8 @@ class ConcurrencyTest extends IntegrationTestSupport {
         Delivery delivery = new Delivery();
         delivery.setCustomer(customer);
         delivery.setStatus(DeliveryStatus.CREATED);
+        delivery.setPickupLatitude(19.0);
+        delivery.setPickupLongitude(73.0);
         return deliveryRepository.save(delivery);
     }
 }

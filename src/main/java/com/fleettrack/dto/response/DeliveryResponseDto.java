@@ -9,4 +9,8 @@ public class DeliveryResponseDto {
     private Long driverId;
     private Long customerId;
     private String status;
+    private Double pickupLatitude;
+    private Double pickupLongitude;
+    private Double dropLatitude;
+    private Double dropLongitude;
 }

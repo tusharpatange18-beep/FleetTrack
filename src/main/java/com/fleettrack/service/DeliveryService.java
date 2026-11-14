@@ -1,7 +1,9 @@
 package com.fleettrack.service;
 
+import com.fleettrack.config.FleetProperties;
 import com.fleettrack.dto.request.DeliveryRequestDto;
 import com.fleettrack.dto.request.DeliveryStatusUpdateRequestDto;
+import com.fleettrack.dto.response.AutoAssignmentResponseDto;
 import com.fleettrack.dto.response.DeliveryResponseDto;
 import com.fleettrack.entity.Customer;
 import com.fleettrack.entity.Delivery;
@@ -56,6 +58,8 @@ public class DeliveryService {
     private final CustomerRepository customerRepository;
     private final VehicleRepository vehicleRepository;
     private final DeliveryMapper deliveryMapper;
+    private final ProximitySearch proximitySearch;
+    private final FleetProperties properties;
 
     public Page<DeliveryResponseDto> getDeliveries(Pageable pageable) {
         return deliveryRepository.findAll(pageable).map(deliveryMapper::toDto);
@@ -69,6 +73,13 @@ public class DeliveryService {
         Delivery delivery = new Delivery();
         delivery.setCustomer(customer);
         delivery.setStatus(DeliveryStatus.CREATED);
+        // Route: use the request's coordinates, otherwise the customer's saved addresses
+        boolean pickupGiven = requestDto.getPickupLatitude() != null;
+        delivery.setPickupLatitude(pickupGiven ? requestDto.getPickupLatitude() : customer.getPickupLatitude());
+        delivery.setPickupLongitude(pickupGiven ? requestDto.getPickupLongitude() : customer.getPickupLongitude());
+        boolean dropGiven = requestDto.getDropLatitude() != null;
+        delivery.setDropLatitude(dropGiven ? requestDto.getDropLatitude() : customer.getDropLatitude());
+        delivery.setDropLongitude(dropGiven ? requestDto.getDropLongitude() : customer.getDropLongitude());
 
         Delivery saved = deliveryRepository.save(delivery);
         log.info("Created delivery id={} for customer id={}", saved.getId(), customer.getId());
@@ -92,6 +103,45 @@ public class DeliveryService {
             .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + vehicleId));
         assign(delivery, vehicle);
         return deliveryMapper.toDto(delivery);
+    }
+
+    /**
+     * Assigns the nearest vehicle that can take the job: AVAILABLE, with an ACTIVE driver and a
+     * location ping newer than fleettrack.location-max-age, within radiusKm of the pickup point.
+     * <p>
+     * Candidates come from an unlocked read, so by the time we lock the nearest one another
+     * dispatcher may have taken it. We therefore lock candidates one by one, nearest first, and
+     * re-check each under the lock; the first that still qualifies wins.
+     */
+    @Transactional
+    public AutoAssignmentResponseDto autoAssign(Long deliveryId, Double radiusKm) {
+        double radius = radiusKm != null ? radiusKm : properties.autoAssignRadiusKm();
+        Delivery delivery = lockDelivery(deliveryId);
+        if (delivery.getStatus() != DeliveryStatus.CREATED) {
+            throw new ConflictException("Delivery must be in CREATED state to assign, current state: " + delivery.getStatus());
+        }
+        if (delivery.getPickupLatitude() == null || delivery.getPickupLongitude() == null) {
+            throw new BadRequestException("Delivery has no pickup location to search from");
+        }
+
+        for (ProximitySearch.Candidate candidate : proximitySearch.nearestAvailable(
+                delivery.getPickupLatitude(), delivery.getPickupLongitude(), radius, true)) {
+            Vehicle vehicle = vehicleRepository.findByIdForUpdate(candidate.vehicle().id()).orElse(null);
+            if (vehicle != null && isAssignable(vehicle)) {
+                assign(delivery, vehicle);
+                log.info("Auto-assigned vehicle id={} to delivery id={} at {} km",
+                        vehicle.getId(), deliveryId, String.format("%.2f", candidate.distanceKm()));
+                return new AutoAssignmentResponseDto(deliveryMapper.toDto(delivery),
+                        Math.round(candidate.distanceKm() * 100.0) / 100.0);
+            }
+        }
+        throw new ConflictException("No available vehicle with an active driver within " + radius + " km of the pickup");
+    }
+
+    private static boolean isAssignable(Vehicle vehicle) {
+        return vehicle.getStatus() == VehicleStatus.AVAILABLE
+                && vehicle.getDriver() != null
+                && vehicle.getDriver().getStatus() == DriverStatus.ACTIVE;
     }
 
     /** Shared by manual and automatic assignment. Caller must hold locks on both rows. */
