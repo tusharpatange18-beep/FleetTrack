@@ -9,6 +9,7 @@ import com.fleettrack.entity.enums.VehicleStatus;
 import com.fleettrack.exception.ConflictException;
 import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.DriverMapper;
+import com.fleettrack.repository.DeliveryRepository;
 import com.fleettrack.repository.DriverRepository;
 import com.fleettrack.repository.VehicleRepository;
 import lombok.RequiredArgsConstructor;
@@ -28,6 +29,7 @@ public class DriverService {
 
     private final DriverRepository driverRepository;
     private final VehicleRepository vehicleRepository;
+    private final DeliveryRepository deliveryRepository;
     private final DriverMapper driverMapper;
 
     public Page<DriverResponseDto> getDrivers(Pageable pageable) {
@@ -125,7 +127,7 @@ public class DriverService {
 
     private void detach(Driver driver, Vehicle vehicle) {
         Vehicle locked = vehicleRepository.findByIdForUpdate(vehicle.getId()).orElseThrow();
-        if (locked.getStatus() == VehicleStatus.BUSY) {
+        if (deliveryRepository.existsByVehicleIdAndStatusIn(locked.getId(), DeliveryService.ACTIVE_STATUSES)) {
             throw new ConflictException("The driver's vehicle is on an active delivery; finish or cancel it first");
         }
         locked.setDriver(null);

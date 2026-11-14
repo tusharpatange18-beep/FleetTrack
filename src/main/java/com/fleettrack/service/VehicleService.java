@@ -13,6 +13,7 @@ import com.fleettrack.exception.BadRequestException;
 import com.fleettrack.exception.ConflictException;
 import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.VehicleMapper;
+import com.fleettrack.repository.DeliveryRepository;
 import com.fleettrack.repository.LocationHistoryRepository;
 import com.fleettrack.repository.VehicleRepository;
 import lombok.RequiredArgsConstructor;
@@ -40,6 +41,7 @@ public class VehicleService {
 
     private final VehicleRepository vehicleRepository;
     private final LocationHistoryRepository locationHistoryRepository;
+    private final DeliveryRepository deliveryRepository;
     private final VehicleMapper vehicleMapper;
     private final ProximitySearch proximitySearch;
     private final Clock clock;
@@ -96,7 +98,9 @@ public class VehicleService {
                 throw new BadRequestException("Status can only be set to AVAILABLE or OFFLINE; "
                         + "BUSY is set by delivery assignment and INACTIVE by DELETE");
             }
-            if (vehicle.getStatus() == VehicleStatus.BUSY) {
+            // Decide by the deliveries table, not the status field, so a vehicle left BUSY by
+            // inconsistent data can still be repaired
+            if (isOnActiveDelivery(vehicle)) {
                 throw new ConflictException("Vehicle is on an active delivery; finish or cancel it first");
             }
             vehicle.setStatus(newStatus);
@@ -151,7 +155,7 @@ public class VehicleService {
     @Transactional
     public void deleteVehicle(Long id) {
         Vehicle vehicle = lockVehicle(id);
-        if (vehicle.getStatus() == VehicleStatus.BUSY) {
+        if (isOnActiveDelivery(vehicle)) {
             throw new ConflictException("Vehicle is on an active delivery; finish or cancel it first");
         }
         vehicle.setStatus(VehicleStatus.INACTIVE);
@@ -181,6 +185,10 @@ public class VehicleService {
     public Vehicle findVehicleById(Long id) {
         return vehicleRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + id));
+    }
+
+    private boolean isOnActiveDelivery(Vehicle vehicle) {
+        return deliveryRepository.existsByVehicleIdAndStatusIn(vehicle.getId(), DeliveryService.ACTIVE_STATUSES);
     }
 
     Vehicle lockVehicle(Long id) {

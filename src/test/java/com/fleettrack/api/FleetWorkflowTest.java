@@ -76,6 +76,17 @@ class FleetWorkflowTest extends IntegrationTestSupport {
     }
 
     @Test
+    void vehicleLeftBusyWithoutADelivery_canBeRepairedThroughTheApi() throws Exception {
+        long vehicleId = readyVehicle(token, "MH01STUCK1", 19.07, 72.87);
+        // Inconsistent row as older versions could leave it: BUSY, no delivery holds it
+        jdbc.update("UPDATE vehicle SET status = 'BUSY' WHERE id = ?", vehicleId);
+
+        patchJson(token, "/api/vehicles/" + vehicleId, Map.of("status", "AVAILABLE"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("AVAILABLE"));
+    }
+
+    @Test
     void usersCannotSetBusyByHand_butPartialUpdateWorks() throws Exception {
         long vehicleId = createVehicle(token, "MH01AA0004");
 

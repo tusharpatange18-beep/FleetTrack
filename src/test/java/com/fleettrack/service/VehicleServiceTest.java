@@ -10,6 +10,7 @@ import com.fleettrack.exception.BadRequestException;
 import com.fleettrack.exception.ConflictException;
 import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.VehicleMapper;
+import com.fleettrack.repository.DeliveryRepository;
 import com.fleettrack.repository.LocationHistoryRepository;
 import com.fleettrack.repository.VehicleRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,13 +28,15 @@ import static org.mockito.Mockito.*;
 class VehicleServiceTest {
 
     private VehicleRepository vehicleRepository;
+    private DeliveryRepository deliveryRepository;
     private VehicleService vehicleService;
 
     @BeforeEach
     void setUp() {
         vehicleRepository = mock(VehicleRepository.class);
+        deliveryRepository = mock(DeliveryRepository.class);
         vehicleService = new VehicleService(vehicleRepository, mock(LocationHistoryRepository.class),
-                new VehicleMapper(), mock(ProximitySearch.class), Clock.systemUTC());
+                deliveryRepository, new VehicleMapper(), mock(ProximitySearch.class), Clock.systemUTC());
     }
 
     @Test
@@ -76,11 +79,26 @@ class VehicleServiceTest {
     }
 
     @Test
-    void updateVehicle_cannotChangeStatusWhileBusy() {
+    void updateVehicle_cannotChangeStatusWhileOnADelivery() {
         when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle(VehicleStatus.BUSY)));
+        when(deliveryRepository.existsByVehicleIdAndStatusIn(any(), any())).thenReturn(true);
         VehicleUpdateRequestDto request = new VehicleUpdateRequestDto();
         request.setStatus(VehicleStatus.OFFLINE);
         assertThrows(ConflictException.class, () -> vehicleService.updateVehicle(1L, request));
+    }
+
+    @Test
+    void updateVehicle_busyWithoutADelivery_canBeRepaired() {
+        // Inconsistent data (e.g. from an older version): BUSY, but no delivery holds the vehicle
+        Vehicle stuck = vehicle(VehicleStatus.BUSY);
+        when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(stuck));
+        when(deliveryRepository.existsByVehicleIdAndStatusIn(any(), any())).thenReturn(false);
+        VehicleUpdateRequestDto request = new VehicleUpdateRequestDto();
+        request.setStatus(VehicleStatus.AVAILABLE);
+
+        vehicleService.updateVehicle(1L, request);
+
+        assertEquals(VehicleStatus.AVAILABLE, stuck.getStatus());
     }
 
     @Test
@@ -106,6 +124,7 @@ class VehicleServiceTest {
     @Test
     void deleteVehicle_refusedDuringDelivery() {
         when(vehicleRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(vehicle(VehicleStatus.BUSY)));
+        when(deliveryRepository.existsByVehicleIdAndStatusIn(any(), any())).thenReturn(true);
         assertThrows(ConflictException.class, () -> vehicleService.deleteVehicle(1L));
     }
 
