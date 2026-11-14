@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * (it always runs in CI).
  */
 @SpringBootTest
+@org.springframework.test.context.ActiveProfiles("test")
 @Testcontainers(disabledWithoutDocker = true)
 class MySqlMigrationTest {
 

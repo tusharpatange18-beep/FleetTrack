@@ -1,0 +1,28 @@
+# Test profile, layered on top of src/main/resources/application.yml (so tests exercise the real
+# config). Runs the real Flyway migrations on H2 (MySQL mode) and lets Hibernate *validate* the
+# entities against that schema. MySqlMigrationTest repeats this on a real MySQL 8 container.
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=MySQL;DATABASE_TO_LOWER=TRUE;LOCK_TIMEOUT=10000
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+
+jwt:
+  secret: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+  expiration-ms: 86400000
+
+logging:
+  level:
+    com.fleettrack: WARN
+
+fleettrack:
+  # The suite logs in hundreds of times from one IP; the limiter itself is unit-tested
+  login-attempts-per-minute: 100000
+  cors-allowed-origins: http://localhost:5173
