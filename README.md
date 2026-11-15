@@ -4,6 +4,10 @@
 
 A Spring Boot backend for running a delivery fleet. Dispatchers register vehicles and drivers, track vehicle positions, create deliveries, and assign them manually or automatically to the nearest suitable vehicle. A strict state machine and row-level locking keep the data consistent when several dispatchers work at the same time.
 
+**Web UI:** an Uber-style dispatcher console and driver app live in [`frontend/`](frontend/README.md) (React, TypeScript, Leaflet).
+
+![Dispatcher console](frontend/docs/dispatch.png)
+
 **Stack:** Java 21 · Spring Boot 3.5 (Web, Data JPA, Security, Validation, Actuator) · MySQL 8 · Flyway · JWT (jjwt) · springdoc OpenAPI · JUnit 5, Mockito, Testcontainers, JaCoCo · Docker · GitHub Actions
 
 ---
@@ -178,6 +182,18 @@ Get-Content local.env | Where-Object { $_ -and $_ -notmatch '^#' } | ForEach-Obj
 ```
 
 Swagger UI (in `dev`): `http://localhost:8080/swagger-ui.html`
+
+### Web UI
+
+With the backend running on port 8080, start the UI in a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev            # http://localhost:5173
+```
+
+Log in with a FleetTrack account. Use **Dispatch** to create deliveries on the map and **Driver app** to simulate the trip. See [frontend/README.md](frontend/README.md).
 
 ## Testing
 
