@@ -2,6 +2,8 @@ package com.fleettrack.dto.response;
 
 import lombok.Data;
 
+import java.time.LocalDateTime;
+
 @Data
 public class VehicleResponseDto {
     private Long id;
@@ -10,5 +12,6 @@ public class VehicleResponseDto {
     private String status;
     private Double currentLatitude;
     private Double currentLongitude;
+    private LocalDateTime locationUpdatedAt;
     private Long driverId;
 }

@@ -1,13 +1,17 @@
 package com.fleettrack.service;
 
+import com.fleettrack.config.FleetProperties;
 import com.fleettrack.dto.request.DeliveryRequestDto;
 import com.fleettrack.dto.request.DeliveryStatusUpdateRequestDto;
+import com.fleettrack.dto.response.AutoAssignmentResponseDto;
 import com.fleettrack.dto.response.DeliveryResponseDto;
 import com.fleettrack.entity.Customer;
 import com.fleettrack.entity.Delivery;
 import com.fleettrack.entity.Vehicle;
 import com.fleettrack.entity.enums.DeliveryStatus;
+import com.fleettrack.entity.enums.DriverStatus;
 import com.fleettrack.entity.enums.VehicleStatus;
+import com.fleettrack.exception.BadRequestException;
 import com.fleettrack.exception.ConflictException;
 import com.fleettrack.exception.ResourceNotFoundException;
 import com.fleettrack.mapper.DeliveryMapper;
@@ -22,18 +26,40 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
+@Transactional(readOnly = true)
 public class DeliveryService {
 
     private static final Logger log = LoggerFactory.getLogger(DeliveryService.class);
+
+    /** Statuses in which a delivery holds its vehicle. */
+    public static final Set<DeliveryStatus> ACTIVE_STATUSES =
+            EnumSet.of(DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.IN_TRANSIT);
+
+    /**
+     * The delivery state machine. CREATED -> ASSIGNED happens only through assignDelivery,
+     * because it needs a vehicle; the status endpoint handles every other edge.
+     */
+    private static final Map<DeliveryStatus, Set<DeliveryStatus>> TRANSITIONS = Map.of(
+            DeliveryStatus.CREATED,    EnumSet.of(DeliveryStatus.ASSIGNED, DeliveryStatus.CANCELLED),
+            DeliveryStatus.ASSIGNED,   EnumSet.of(DeliveryStatus.PICKED_UP, DeliveryStatus.CANCELLED),
+            DeliveryStatus.PICKED_UP,  EnumSet.of(DeliveryStatus.IN_TRANSIT),
+            DeliveryStatus.IN_TRANSIT, EnumSet.of(DeliveryStatus.DELIVERED),
+            DeliveryStatus.DELIVERED,  EnumSet.noneOf(DeliveryStatus.class),
+            DeliveryStatus.CANCELLED,  EnumSet.noneOf(DeliveryStatus.class)
+    );
 
     private final DeliveryRepository deliveryRepository;
     private final CustomerRepository customerRepository;
     private final VehicleRepository vehicleRepository;
     private final DeliveryMapper deliveryMapper;
+    private final ProximitySearch proximitySearch;
+    private final FleetProperties properties;
 
     public Page<DeliveryResponseDto> getDeliveries(Pageable pageable) {
         return deliveryRepository.findAll(pageable).map(deliveryMapper::toDto);
@@ -47,9 +73,16 @@ public class DeliveryService {
         Delivery delivery = new Delivery();
         delivery.setCustomer(customer);
         delivery.setStatus(DeliveryStatus.CREATED);
+        // Route: use the request's coordinates, otherwise the customer's saved addresses
+        boolean pickupGiven = requestDto.getPickupLatitude() != null;
+        delivery.setPickupLatitude(pickupGiven ? requestDto.getPickupLatitude() : customer.getPickupLatitude());
+        delivery.setPickupLongitude(pickupGiven ? requestDto.getPickupLongitude() : customer.getPickupLongitude());
+        boolean dropGiven = requestDto.getDropLatitude() != null;
+        delivery.setDropLatitude(dropGiven ? requestDto.getDropLatitude() : customer.getDropLatitude());
+        delivery.setDropLongitude(dropGiven ? requestDto.getDropLongitude() : customer.getDropLongitude());
 
         Delivery saved = deliveryRepository.save(delivery);
-        log.info("Created delivery id={} for customer id={}", saved.getId(), requestDto.getCustomerId());
+        log.info("Created delivery id={} for customer id={}", saved.getId(), customer.getId());
         return deliveryMapper.toDto(saved);
     }
 
@@ -58,105 +91,132 @@ public class DeliveryService {
     }
 
     /**
-     * Assign a vehicle (with driver) to a delivery.
-     * Business rules:
-     * - Delivery must be in CREATED state.
-     * - Vehicle must be AVAILABLE.
-     * - Vehicle must have an assigned driver.
-     * - Vehicle must not already be in an active delivery.
-     * After assignment: delivery -> ASSIGNED, vehicle -> BUSY.
+     * Assigns a vehicle (and its driver) to a delivery.
+     * Rules: delivery is CREATED; vehicle is AVAILABLE; vehicle has an ACTIVE driver; vehicle is
+     * not on another active delivery. Afterwards: delivery ASSIGNED, vehicle BUSY.
+     * Both rows are locked (delivery first, then vehicle, always in that order to avoid deadlocks).
      */
     @Transactional
     public DeliveryResponseDto assignDelivery(Long deliveryId, Long vehicleId) {
-        Delivery delivery = findDeliveryById(deliveryId);
+        Delivery delivery = lockDelivery(deliveryId);
+        Vehicle vehicle = vehicleRepository.findByIdForUpdate(vehicleId)
+            .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + vehicleId));
+        assign(delivery, vehicle);
+        return deliveryMapper.toDto(delivery);
+    }
+
+    /**
+     * Assigns the nearest vehicle that can take the job: AVAILABLE, with an ACTIVE driver and a
+     * location ping newer than fleettrack.location-max-age, within radiusKm of the pickup point.
+     * <p>
+     * Candidates come from an unlocked read, so by the time we lock the nearest one another
+     * dispatcher may have taken it. We therefore lock candidates one by one, nearest first, and
+     * re-check each under the lock; the first that still qualifies wins.
+     */
+    @Transactional
+    public AutoAssignmentResponseDto autoAssign(Long deliveryId, Double radiusKm) {
+        double radius = radiusKm != null ? radiusKm : properties.autoAssignRadiusKm();
+        Delivery delivery = lockDelivery(deliveryId);
         if (delivery.getStatus() != DeliveryStatus.CREATED) {
             throw new ConflictException("Delivery must be in CREATED state to assign, current state: " + delivery.getStatus());
         }
+        if (delivery.getPickupLatitude() == null || delivery.getPickupLongitude() == null) {
+            throw new BadRequestException("Delivery has no pickup location to search from");
+        }
 
-        Vehicle vehicle = vehicleRepository.findById(vehicleId)
-            .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + vehicleId));
+        for (ProximitySearch.Candidate candidate : proximitySearch.nearestAvailable(
+                delivery.getPickupLatitude(), delivery.getPickupLongitude(), radius, true)) {
+            Vehicle vehicle = vehicleRepository.findByIdForUpdate(candidate.vehicle().id()).orElse(null);
+            if (vehicle != null && isAssignable(vehicle)) {
+                assign(delivery, vehicle);
+                log.info("Auto-assigned vehicle id={} to delivery id={} at {} km",
+                        vehicle.getId(), deliveryId, String.format("%.2f", candidate.distanceKm()));
+                return new AutoAssignmentResponseDto(deliveryMapper.toDto(delivery),
+                        Math.round(candidate.distanceKm() * 100.0) / 100.0);
+            }
+        }
+        throw new ConflictException("No available vehicle with an active driver within " + radius + " km of the pickup");
+    }
 
+    private static boolean isAssignable(Vehicle vehicle) {
+        return vehicle.getStatus() == VehicleStatus.AVAILABLE
+                && vehicle.getDriver() != null
+                && vehicle.getDriver().getStatus() == DriverStatus.ACTIVE;
+    }
+
+    /** Shared by manual and automatic assignment. Caller must hold locks on both rows. */
+    void assign(Delivery delivery, Vehicle vehicle) {
+        if (delivery.getStatus() != DeliveryStatus.CREATED) {
+            throw new ConflictException("Delivery must be in CREATED state to assign, current state: " + delivery.getStatus());
+        }
         if (vehicle.getStatus() != VehicleStatus.AVAILABLE) {
             throw new ConflictException("Vehicle is not AVAILABLE (status: " + vehicle.getStatus() + ")");
         }
-
         if (vehicle.getDriver() == null) {
             throw new ConflictException("Vehicle does not have an assigned driver");
         }
-
-        // Extra safety: ensure no other active delivery uses this vehicle
-        if (deliveryRepository.existsByVehicleIdAndStatusIn(vehicleId,
-                List.of(DeliveryStatus.ASSIGNED, DeliveryStatus.PICKED_UP, DeliveryStatus.IN_TRANSIT))) {
+        if (vehicle.getDriver().getStatus() != DriverStatus.ACTIVE) {
+            throw new ConflictException("The vehicle's driver is not ACTIVE");
+        }
+        // Defence in depth: the status check above should already guarantee this
+        if (deliveryRepository.existsByVehicleIdAndStatusIn(vehicle.getId(), ACTIVE_STATUSES)) {
             throw new ConflictException("Vehicle is already assigned to another active delivery");
         }
 
         delivery.setVehicle(vehicle);
         delivery.setDriver(vehicle.getDriver());
         delivery.setStatus(DeliveryStatus.ASSIGNED);
-
         vehicle.setStatus(VehicleStatus.BUSY);
-        vehicleRepository.save(vehicle);
-
-        Delivery saved = deliveryRepository.save(delivery);
-        log.info("Assigned vehicle id={} (driver id={}) to delivery id={}", vehicleId, vehicle.getDriver().getId(), deliveryId);
-        return deliveryMapper.toDto(saved);
+        log.info("Assigned vehicle id={} (driver id={}) to delivery id={}",
+                vehicle.getId(), vehicle.getDriver().getId(), delivery.getId());
     }
 
     /**
-     * Update delivery status following the state machine.
-     * Valid transitions:
-     *   CREATED   -> ASSIGNED (via assignDelivery)
-     *   ASSIGNED  -> PICKED_UP
-     *   PICKED_UP -> IN_TRANSIT
-     *   IN_TRANSIT-> DELIVERED
-     *   CREATED   -> CANCELLED
-     *   ASSIGNED  -> CANCELLED
-     *
-     * On DELIVERED or CANCELLED: vehicle is released back to AVAILABLE.
+     * Moves a delivery along the state machine. On DELIVERED or CANCELLED the vehicle is
+     * released back to AVAILABLE.
      */
     @Transactional
     public DeliveryResponseDto updateStatus(Long id, DeliveryStatusUpdateRequestDto request) {
-        Delivery delivery = findDeliveryById(id);
-        DeliveryStatus oldStatus = delivery.getStatus();
         DeliveryStatus newStatus = request.getStatus();
+        if (newStatus == DeliveryStatus.ASSIGNED) {
+            throw new BadRequestException("Use PATCH /api/deliveries/{id}/assign to assign a vehicle");
+        }
 
+        Delivery delivery = lockDelivery(id);
+        DeliveryStatus oldStatus = delivery.getStatus();
         if (!isValidTransition(oldStatus, newStatus)) {
             throw new ConflictException("Invalid state transition from " + oldStatus + " to " + newStatus);
         }
-
         delivery.setStatus(newStatus);
 
-        // Release vehicle when delivery is terminal
-        if ((newStatus == DeliveryStatus.DELIVERED || newStatus == DeliveryStatus.CANCELLED)
-                && delivery.getVehicle() != null) {
-            Vehicle vehicle = delivery.getVehicle();
-            vehicle.setStatus(VehicleStatus.AVAILABLE);
-            vehicleRepository.save(vehicle);
-            log.info("Released vehicle id={} back to AVAILABLE after delivery id={} reached status {}", vehicle.getId(), id, newStatus);
+        if (isTerminal(newStatus) && delivery.getVehicle() != null) {
+            Vehicle vehicle = vehicleRepository.findByIdForUpdate(delivery.getVehicle().getId()).orElseThrow();
+            // A vehicle deactivated meanwhile stays INACTIVE; only BUSY goes back to AVAILABLE
+            if (vehicle.getStatus() == VehicleStatus.BUSY) {
+                vehicle.setStatus(VehicleStatus.AVAILABLE);
+            }
+            log.info("Released vehicle id={} after delivery id={} reached {}", vehicle.getId(), id, newStatus);
         }
 
-        Delivery saved = deliveryRepository.save(delivery);
         log.info("Delivery id={} status changed from {} to {}", id, oldStatus, newStatus);
-        return deliveryMapper.toDto(saved);
+        return deliveryMapper.toDto(delivery);
     }
 
-    private boolean isValidTransition(DeliveryStatus from, DeliveryStatus to) {
-        // Cancellation allowed from CREATED or ASSIGNED only
-        if (to == DeliveryStatus.CANCELLED) {
-            return from == DeliveryStatus.CREATED || from == DeliveryStatus.ASSIGNED;
-        }
-        // Normal forward progression
-        return switch (from) {
-            case CREATED   -> to == DeliveryStatus.ASSIGNED;
-            case ASSIGNED  -> to == DeliveryStatus.PICKED_UP;
-            case PICKED_UP -> to == DeliveryStatus.IN_TRANSIT;
-            case IN_TRANSIT-> to == DeliveryStatus.DELIVERED;
-            default        -> false; // DELIVERED, CANCELLED are terminal
-        };
+    static boolean isValidTransition(DeliveryStatus from, DeliveryStatus to) {
+        return TRANSITIONS.getOrDefault(from, Set.of()).contains(to);
+    }
+
+    static boolean isTerminal(DeliveryStatus status) {
+        return status == DeliveryStatus.DELIVERED || status == DeliveryStatus.CANCELLED;
     }
 
     private Delivery findDeliveryById(Long id) {
         return deliveryRepository.findById(id)
+            .orElseThrow(() -> new ResourceNotFoundException("Delivery not found with id: " + id));
+    }
+
+    Delivery lockDelivery(Long id) {
+        return deliveryRepository.findByIdForUpdate(id)
             .orElseThrow(() -> new ResourceNotFoundException("Delivery not found with id: " + id));
     }
 }

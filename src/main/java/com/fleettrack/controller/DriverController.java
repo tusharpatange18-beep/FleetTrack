@@ -57,4 +57,11 @@ public class DriverController {
     public void assignVehicle(@PathVariable Long driverId, @PathVariable Long vehicleId) {
         driverService.assignVehicle(driverId, vehicleId);
     }
+
+    @Operation(summary = "Unassign a driver from their vehicle (not allowed during an active delivery)")
+    @DeleteMapping("/{driverId}/vehicle")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void unassignVehicle(@PathVariable Long driverId) {
+        driverService.unassignVehicle(driverId);
+    }
 }
