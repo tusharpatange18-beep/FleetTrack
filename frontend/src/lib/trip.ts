@@ -1,5 +1,5 @@
 import type { Delivery, DeliveryStatus, LatLng } from '../api/types';
-import { stepToward } from './geo';
+import { stepToward, toPoint } from './geo';
 
 /** What the driver simulator should do on one tick. */
 export interface TripTick {
@@ -13,53 +13,52 @@ export interface TripTick {
 }
 
 /**
- * Pure step function for the simulated trip:
+ * One step of the simulated trip (a "pure" function: same input, same output, no side effects):
  * ASSIGNED   -> drive to pickup; on arrival mark PICKED_UP and IN_TRANSIT
  * IN_TRANSIT -> drive to drop;   on arrival mark DELIVERED
  * PICKED_UP  -> (picked up but not moving yet) mark IN_TRANSIT
  */
 export function tripTick(delivery: Delivery, position: LatLng, stepKm: number): TripTick {
-  const pickup = point(delivery.pickupLatitude, delivery.pickupLongitude);
-  const drop = point(delivery.dropLatitude, delivery.dropLongitude);
+  const pickup = toPoint(delivery.pickupLatitude, delivery.pickupLongitude);
+  const drop = toPoint(delivery.dropLatitude, delivery.dropLongitude);
 
-  switch (delivery.status) {
-    case 'ASSIGNED': {
-      if (!pickup) return idle('No pickup location');
-      const next = stepToward(position, pickup, stepKm);
-      const arrived = same(next, pickup);
-      return {
-        position: next,
-        statusChanges: arrived ? ['PICKED_UP', 'IN_TRANSIT'] : [],
-        phase: arrived ? 'Picked up, heading to drop' : 'Driving to pickup',
-        done: false,
-      };
+  if (delivery.status === 'ASSIGNED') {
+    if (!pickup) {
+      return idle('No pickup location');
     }
-    case 'PICKED_UP':
-      return { position: null, statusChanges: ['IN_TRANSIT'], phase: 'Starting trip', done: false };
-    case 'IN_TRANSIT': {
-      if (!drop) return idle('No drop location');
-      const next = stepToward(position, drop, stepKm);
-      const arrived = same(next, drop);
-      return {
-        position: next,
-        statusChanges: arrived ? ['DELIVERED'] : [],
-        phase: arrived ? 'Delivered' : 'Driving to drop',
-        done: arrived,
-      };
+    const next = stepToward(position, pickup, stepKm);
+    if (samePoint(next, pickup)) {
+      // Arrived at the pickup: collect the parcel and set off straight away
+      return { position: next, statusChanges: ['PICKED_UP', 'IN_TRANSIT'], phase: 'Picked up, heading to drop', done: false };
     }
-    default:
-      return { ...idle('Trip finished'), done: true };
+    return { position: next, statusChanges: [], phase: 'Driving to pickup', done: false };
   }
+
+  if (delivery.status === 'PICKED_UP') {
+    return { position: null, statusChanges: ['IN_TRANSIT'], phase: 'Starting trip', done: false };
+  }
+
+  if (delivery.status === 'IN_TRANSIT') {
+    if (!drop) {
+      return idle('No drop location');
+    }
+    const next = stepToward(position, drop, stepKm);
+    if (samePoint(next, drop)) {
+      // Arrived at the drop: the trip is over
+      return { position: next, statusChanges: ['DELIVERED'], phase: 'Delivered', done: true };
+    }
+    return { position: next, statusChanges: [], phase: 'Driving to drop', done: false };
+  }
+
+  // CREATED, DELIVERED or CANCELLED: nothing to drive
+  return { position: null, statusChanges: [], phase: 'Trip finished', done: true };
 }
 
+/** A tick that does nothing except show a message. */
 function idle(phase: string): TripTick {
-  return { position: null, statusChanges: [], phase, done: false };
+  return { position: null, statusChanges: [], phase: phase, done: false };
 }
 
-function point(lat: number | null, lng: number | null): LatLng | null {
-  return lat == null || lng == null ? null : { lat, lng };
-}
-
-function same(a: LatLng, b: LatLng) {
+function samePoint(a: LatLng, b: LatLng): boolean {
   return a.lat === b.lat && a.lng === b.lng;
 }

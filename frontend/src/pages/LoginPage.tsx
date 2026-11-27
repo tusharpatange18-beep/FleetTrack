@@ -7,20 +7,27 @@ export function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false); // true while the login request is running
 
-  if (token) return <Navigate to="/" replace />;
+  // Already logged in: go straight to the dispatcher page
+  if (token) {
+    return <Navigate to="/" replace />;
+  }
 
   async function submit(e: FormEvent) {
-    e.preventDefault();
+    e.preventDefault(); // stop the browser from reloading the page on form submit
     setBusy(true);
     setError(null);
     try {
       await login(username, password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError('Login failed');
+      }
     } finally {
-      setBusy(false);
+      setBusy(false); // runs after success and after failure
     }
   }
 
