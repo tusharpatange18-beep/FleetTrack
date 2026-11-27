@@ -18,6 +18,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
+/** HTTP endpoints for deliveries. All rules (state machine, locking) are in DeliveryService. */
 @Tag(name = "Deliveries", description = "Delivery lifecycle and vehicle assignment")
 @RestController
 @RequestMapping("/api/deliveries")

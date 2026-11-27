@@ -20,9 +20,12 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Optional;
+
+/** Business rules for drivers: create, update, soft delete, and linking a driver to a vehicle. */
 @Service
-@RequiredArgsConstructor
-@Transactional(readOnly = true)
+@RequiredArgsConstructor          // Lombok: creates a constructor for all the final fields below
+@Transactional(readOnly = true)   // every method runs in a read-only transaction unless it says otherwise
 public class DriverService {
 
     private static final Logger log = LoggerFactory.getLogger(DriverService.class);
@@ -32,40 +35,56 @@ public class DriverService {
     private final DeliveryRepository deliveryRepository;
     private final DriverMapper driverMapper;
 
+    /** One page of drivers, converted to response DTOs. */
     public Page<DriverResponseDto> getDrivers(Pageable pageable) {
-        return driverRepository.findAll(pageable).map(driverMapper::toDto);
+        Page<Driver> page = driverRepository.findAll(pageable);
+        // Page.map converts every Driver on the page with driverMapper.toDto
+        return page.map(driverMapper::toDto);
     }
 
     @Transactional
     public DriverResponseDto createDriver(DriverRequestDto requestDto) {
+        // Phone and license number must both be unique
         if (driverRepository.existsByPhone(requestDto.getPhone())) {
             throw new ConflictException("A driver with this phone number already exists");
         }
         if (driverRepository.existsByLicenseNumber(requestDto.getLicenseNumber())) {
             throw new ConflictException("A driver with this license number already exists");
         }
-        Driver saved = driverRepository.save(driverMapper.toEntity(requestDto));
+        Driver newDriver = driverMapper.toEntity(requestDto);
+        Driver saved = driverRepository.save(newDriver);
         log.info("Created driver id={}", saved.getId());
         return driverMapper.toDto(saved);
     }
 
     public DriverResponseDto getDriver(Long id) {
-        return driverMapper.toDto(findDriverById(id));
+        Driver driver = findDriverById(id);
+        return driverMapper.toDto(driver);
     }
 
     @Transactional
     public DriverResponseDto updateDriver(Long id, DriverRequestDto requestDto) {
         Driver driver = findDriverById(id);
-        if (!driver.getPhone().equals(requestDto.getPhone()) && driverRepository.existsByPhone(requestDto.getPhone())) {
+
+        // A changed phone number must not belong to another driver
+        boolean phoneChanged = !driver.getPhone().equals(requestDto.getPhone());
+        if (phoneChanged && driverRepository.existsByPhone(requestDto.getPhone())) {
             throw new ConflictException("A driver with this phone number already exists");
         }
-        if (!driver.getLicenseNumber().equals(requestDto.getLicenseNumber())
-                && driverRepository.existsByLicenseNumber(requestDto.getLicenseNumber())) {
+        // Same rule for the license number
+        boolean licenseChanged = !driver.getLicenseNumber().equals(requestDto.getLicenseNumber());
+        if (licenseChanged && driverRepository.existsByLicenseNumber(requestDto.getLicenseNumber())) {
             throw new ConflictException("A driver with this license number already exists");
         }
-        if (requestDto.getStatus() == DriverStatus.INACTIVE && driver.getStatus() != DriverStatus.INACTIVE) {
+
+        // A driver who is being made INACTIVE must give up their vehicle
+        boolean becomingInactive = requestDto.getStatus() == DriverStatus.INACTIVE
+                && driver.getStatus() != DriverStatus.INACTIVE;
+        if (becomingInactive) {
             releaseFromVehicle(driver);
         }
+
+        // Copy the new values; JPA saves them when the transaction commits
         driver.setName(requestDto.getName());
         driver.setPhone(requestDto.getPhone());
         driver.setLicenseNumber(requestDto.getLicenseNumber());
@@ -116,16 +135,24 @@ public class DriverService {
     @Transactional
     public void unassignVehicle(Long driverId) {
         Driver driver = findDriverById(driverId);
+        // orElseThrow: use the vehicle if there is one, otherwise answer 409 Conflict
         Vehicle vehicle = vehicleRepository.findByDriverId(driverId)
             .orElseThrow(() -> new ConflictException("Driver is not assigned to any vehicle"));
         detach(driver, vehicle);
     }
 
+    /** If the driver is linked to a vehicle, unlink them. Does nothing if they have no vehicle. */
     private void releaseFromVehicle(Driver driver) {
-        vehicleRepository.findByDriverId(driver.getId()).ifPresent(vehicle -> detach(driver, vehicle));
+        // Optional = "maybe a vehicle, maybe nothing"
+        Optional<Vehicle> vehicle = vehicleRepository.findByDriverId(driver.getId());
+        if (vehicle.isPresent()) {
+            detach(driver, vehicle.get());
+        }
     }
 
+    /** Unlinks driver and vehicle. Refused while the vehicle is on an active delivery. */
     private void detach(Driver driver, Vehicle vehicle) {
+        // Lock the vehicle row so a delivery cannot be assigned to it at the same moment
         Vehicle locked = vehicleRepository.findByIdForUpdate(vehicle.getId()).orElseThrow();
         if (deliveryRepository.existsByVehicleIdAndStatusIn(locked.getId(), DeliveryService.ACTIVE_STATUSES)) {
             throw new ConflictException("The driver's vehicle is on an active delivery; finish or cancel it first");
@@ -134,6 +161,7 @@ public class DriverService {
         log.info("Unassigned driver id={} from vehicle id={}", driver.getId(), locked.getId());
     }
 
+    /** orElseThrow: return the driver if found, otherwise throw a 404 error. */
     public Driver findDriverById(Long id) {
         return driverRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Driver not found with id: " + id));

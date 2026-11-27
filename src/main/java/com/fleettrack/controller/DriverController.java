@@ -12,6 +12,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
+/** HTTP endpoints for drivers. Only ADMIN may change drivers; DISPATCHER may read (see SecurityConfig). */
 @Tag(name = "Drivers", description = "Driver management")
 @RestController
 @RequestMapping("/api/drivers")

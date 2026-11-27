@@ -12,9 +12,10 @@ import java.time.LocalDateTime;
  * frequent and not row-locked; without this, a ping that loaded the vehicle before an assignment
  * committed would write the old status back (a lost update).
  */
-@Entity
-@DynamicUpdate
+@Entity                 // JPA: this class is a database table
+@DynamicUpdate          // see the comment above
 @Table(name = "vehicle")
+// Lombok writes the getters, setters and constructors for us at compile time
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
 public class Vehicle {
     @Id
@@ -36,6 +37,8 @@ public class Vehicle {
     private Double currentLongitude;
     private LocalDateTime locationUpdatedAt;
 
+    // One driver per vehicle. LAZY = the driver row is only loaded when we actually use it.
+    // unique = true: the database itself refuses one driver on two vehicles.
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "driver_id", unique = true)
     private Driver driver;

@@ -19,11 +19,13 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+/** Register and login. These URLs are open to everyone (see SecurityConfig). */
 @RestController
 @RequestMapping("/api/auth")
 @RequiredArgsConstructor
@@ -37,41 +39,65 @@ public class AuthController {
     private final JwtService jwtService;
     private final UserDetailsService userDetailsService;
 
+    /** Creates a user account. The password is stored as a BCrypt hash, never as plain text. */
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
     public void register(@Valid @RequestBody RegisterRequestDto request) {
         if (userRepository.findByUsername(request.getUsername()).isPresent()) {
             throw new ConflictException("Username already exists: " + request.getUsername());
         }
-        UserRole role = request.getRole() != null ? request.getRole() : UserRole.DISPATCHER;
-        // Only the first account (bootstrap) or an existing admin may create an ADMIN
-        if (role == UserRole.ADMIN && userRepository.count() > 0 && !isCallerAdmin()) {
-            throw new AccessDeniedException("Only an admin can create admin accounts");
+
+        // No role given: the new user is a DISPATCHER
+        UserRole role = UserRole.DISPATCHER;
+        if (request.getRole() != null) {
+            role = request.getRole();
         }
+
+        // Only the first account (bootstrap) or an existing admin may create an ADMIN
+        if (role == UserRole.ADMIN) {
+            boolean isFirstUser = userRepository.count() == 0;
+            if (!isFirstUser && !isCallerAdmin()) {
+                throw new AccessDeniedException("Only an admin can create admin accounts");
+            }
+        }
+
         AppUser user = new AppUser();
         user.setUsername(request.getUsername());
-        user.setPassword(passwordEncoder.encode(request.getPassword()));
+        user.setPassword(passwordEncoder.encode(request.getPassword())); // BCrypt hash
         user.setRole(role);
         userRepository.save(user);
         log.info("Registered new user: {}, role: {}", request.getUsername(), role);
     }
 
+    /** True if the person making this request is logged in as an ADMIN. */
     private boolean isCallerAdmin() {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        return auth != null && auth.isAuthenticated() && auth.getAuthorities().stream()
-                .anyMatch(a -> a.getAuthority().equals(UserRole.ADMIN.name()));
+        if (auth == null || !auth.isAuthenticated()) {
+            return false;
+        }
+        // Look through the caller's roles for ADMIN
+        for (GrantedAuthority authority : auth.getAuthorities()) {
+            if (authority.getAuthority().equals(UserRole.ADMIN.name())) {
+                return true;
+            }
+        }
+        return false;
     }
 
+    /** Checks username + password and returns a JWT token to send with later requests. */
     @PostMapping("/login")
     public LoginResponseDto login(@Valid @RequestBody LoginRequestDto request) {
         try {
+            // Spring Security loads the user and compares the password with the BCrypt hash
             authenticationManager.authenticate(
                     new UsernamePasswordAuthenticationToken(request.getUsername(), request.getPassword())
             );
         } catch (BadCredentialsException e) {
             log.warn("Failed login attempt for username: {}", request.getUsername());
-            throw e;
+            throw e; // GlobalExceptionHandler turns this into 401
         }
+
+        // Password was right: create the token
         CustomUserDetails userDetails = (CustomUserDetails) userDetailsService.loadUserByUsername(request.getUsername());
         String token = jwtService.generateToken(userDetails);
         log.info("User logged in: {}", request.getUsername());

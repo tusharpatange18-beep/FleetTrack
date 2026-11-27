@@ -24,13 +24,19 @@ public class DeliveryRequestDto {
     @DecimalMin("-180") @DecimalMax("180")
     private Double dropLongitude;
 
+    /** Valid when both pickup values are sent, or both are left out. Only one of them is an error. */
     @AssertTrue(message = "pickupLatitude and pickupLongitude must be sent together")
     public boolean isPickupComplete() {
-        return (pickupLatitude == null) == (pickupLongitude == null);
+        boolean bothSent = pickupLatitude != null && pickupLongitude != null;
+        boolean bothMissing = pickupLatitude == null && pickupLongitude == null;
+        return bothSent || bothMissing;
     }
 
+    /** Same rule for the drop point. */
     @AssertTrue(message = "dropLatitude and dropLongitude must be sent together")
     public boolean isDropComplete() {
-        return (dropLatitude == null) == (dropLongitude == null);
+        boolean bothSent = dropLatitude != null && dropLongitude != null;
+        boolean bothMissing = dropLatitude == null && dropLongitude == null;
+        return bothSent || bothMissing;
     }
 }
