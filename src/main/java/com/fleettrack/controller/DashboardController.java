@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/** One endpoint with the fleet's counts for the dispatcher's home screen. */
 @Tag(name = "Dashboard", description = "Fleet overview")
 @RestController
 @RequestMapping("/api/dashboard")

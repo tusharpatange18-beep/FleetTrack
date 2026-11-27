@@ -7,15 +7,19 @@ import org.hibernate.annotations.DynamicUpdate;
 
 import java.time.LocalDateTime;
 
-@Entity
-@DynamicUpdate
+/** One delivery job. Its status moves through the state machine in DeliveryService. */
+@Entity                 // JPA: this class is a database table
+@DynamicUpdate          // UPDATE only the columns that changed (same reason as on Vehicle)
 @Table(name = "delivery")
+// Lombok writes the getters, setters and constructors for us at compile time
 @Getter @Setter @NoArgsConstructor @AllArgsConstructor @Builder
 public class Delivery {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // Many deliveries over time can use the same vehicle, driver and customer.
+    // vehicle and driver stay empty (null) until the delivery is assigned.
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "vehicle_id")
     private Vehicle vehicle;

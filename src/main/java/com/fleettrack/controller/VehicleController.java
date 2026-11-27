@@ -25,6 +25,11 @@ import org.springframework.web.bind.annotation.*;
 import java.time.LocalDateTime;
 import java.util.List;
 
+/**
+ * HTTP endpoints for vehicles. Controllers stay thin: they read the request and call
+ * VehicleService, where all the rules live. @Valid checks the request body; @Validated
+ * turns on the checks written on parameters (e.g. @DecimalMin on latitude).
+ */
 @Tag(name = "Vehicles", description = "Fleet vehicle management")
 @RestController
 @RequestMapping("/api/vehicles")

@@ -198,7 +198,7 @@ Log in with a FleetTrack account. Use **Dispatch** to create deliveries on the m
 ## Testing
 
 ```bash
-./mvnw verify          # 126 tests; coverage report at target/site/jacoco/index.html (about 91% of lines)
+./mvnw verify          # 129 tests; coverage report at target/site/jacoco/index.html (about 90% of lines)
 ```
 
 | Suite | What it covers |

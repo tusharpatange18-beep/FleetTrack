@@ -41,13 +41,17 @@ public class LoginRateLimitFilter extends OncePerRequestFilter {
     public LoginRateLimitFilter(FleetProperties properties, ObjectMapper objectMapper, Clock clock) {
         this.objectMapper = objectMapper;
         this.clock = clock;
+        // Bucket size = attempts allowed per minute (at least 1)
         this.capacity = Math.max(1, properties.loginAttemptsPerMinute());
+        // A full bucket refills over one minute (60,000 ms), so this many tokens come back per ms
         this.refillPerMilli = capacity / 60_000.0;
     }
 
+    /** This filter only cares about login requests; every other request skips it. */
     @Override
     protected boolean shouldNotFilter(@NonNull HttpServletRequest request) {
-        return !("POST".equals(request.getMethod()) && LOGIN_PATH.equals(request.getRequestURI()));
+        boolean isLoginRequest = "POST".equals(request.getMethod()) && LOGIN_PATH.equals(request.getRequestURI());
+        return !isLoginRequest;
     }
 
     @Override
@@ -56,18 +60,25 @@ public class LoginRateLimitFilter extends OncePerRequestFilter {
         if (buckets.size() > MAX_TRACKED_CLIENTS) {
             buckets.clear(); // crude but safe: everyone simply gets a fresh bucket
         }
+
         // getRemoteAddr honours X-Forwarded-For only when server.forward-headers-strategy trusts the proxy
-        Bucket bucket = buckets.computeIfAbsent(request.getRemoteAddr(), ip -> new Bucket(capacity, clock.millis()));
+        String clientIp = request.getRemoteAddr();
+        // computeIfAbsent: get this IP's bucket, or create a full one if it is the IP's first attempt.
+        // It does both steps as one safe operation, so two requests at once cannot create two buckets.
+        Bucket bucket = buckets.computeIfAbsent(clientIp, ip -> new Bucket(capacity, clock.millis()));
 
         long waitMillis = bucket.tryConsume(clock.millis());
         if (waitMillis > 0) {
+            // Bucket is empty: answer 429 Too Many Requests and say how long to wait
+            long waitSeconds = (long) Math.ceil(waitMillis / 1000.0); // round up, e.g. 1500 ms -> 2 s
             response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
-            response.setHeader("Retry-After", String.valueOf((waitMillis + 999) / 1000));
+            response.setHeader("Retry-After", String.valueOf(waitSeconds));
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             objectMapper.writeValue(response.getOutputStream(), ApiError.of(HttpStatus.TOO_MANY_REQUESTS,
                     "Too many login attempts; try again later", request.getRequestURI()));
-            return;
+            return; // stop here: the login is not attempted
         }
+        // A token was available: let the login request continue
         chain.doFilter(request, response);
     }
 
@@ -76,24 +87,36 @@ public class LoginRateLimitFilter extends OncePerRequestFilter {
         buckets.clear();
     }
 
+    /** One IP's token bucket. Each login attempt takes one token; tokens slowly come back. */
     private final class Bucket {
-        private double tokens;
-        private long lastRefill;
+        private double tokens;     // tokens left (can be a fraction while refilling)
+        private long lastRefill;   // time of the last refill, in ms
 
         Bucket(double tokens, long now) {
             this.tokens = tokens;
             this.lastRefill = now;
         }
 
-        /** Takes one token; returns 0 on success, otherwise milliseconds until a token is available. */
+        /**
+         * Takes one token; returns 0 on success, otherwise milliseconds until a token is available.
+         * synchronized: only one thread at a time may change this bucket.
+         */
         synchronized long tryConsume(long now) {
-            tokens = Math.min(capacity, tokens + (now - lastRefill) * refillPerMilli);
+            // 1) Add the tokens earned since the last refill, but never more than the bucket size
+            long elapsedMillis = now - lastRefill;
+            double refilled = tokens + elapsedMillis * refillPerMilli;
+            tokens = Math.min(capacity, refilled);
             lastRefill = now;
+
+            // 2) Enough for one attempt? Take it
             if (tokens >= 1) {
-                tokens -= 1;
+                tokens = tokens - 1;
                 return 0;
             }
-            return (long) Math.ceil((1 - tokens) / refillPerMilli);
+
+            // 3) Not enough: work out how long until the bucket reaches one whole token
+            double missing = 1 - tokens;
+            return (long) Math.ceil(missing / refillPerMilli);
         }
     }
 }

@@ -16,6 +16,7 @@ import com.fleettrack.mapper.VehicleMapper;
 import com.fleettrack.repository.DeliveryRepository;
 import com.fleettrack.repository.LocationHistoryRepository;
 import com.fleettrack.repository.VehicleRepository;
+import com.fleettrack.util.HaversineCalculator;
 import lombok.RequiredArgsConstructor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,12 +27,14 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+/** Business rules for vehicles: create, update, location pings, soft delete and nearby search. */
 @Service
-@RequiredArgsConstructor
-@Transactional(readOnly = true)
+@RequiredArgsConstructor          // Lombok: creates a constructor for all the final fields below
+@Transactional(readOnly = true)   // every method runs in a read-only transaction unless it says otherwise
 public class VehicleService {
 
     private static final Logger log = LoggerFactory.getLogger(VehicleService.class);
@@ -46,26 +49,33 @@ public class VehicleService {
     private final ProximitySearch proximitySearch;
     private final Clock clock;
 
+    /** One page of vehicles, converted to response DTOs. */
     public Page<VehicleResponseDto> getVehicles(Pageable pageable) {
-        return vehicleRepository.findAll(pageable).map(vehicleMapper::toDto);
+        Page<Vehicle> page = vehicleRepository.findAll(pageable);
+        // Page.map converts every Vehicle on the page with vehicleMapper.toDto
+        return page.map(vehicleMapper::toDto);
     }
 
     @Transactional
     public VehicleResponseDto createVehicle(VehicleRequestDto requestDto) {
+        // A new vehicle may start AVAILABLE or OFFLINE only (no status given = AVAILABLE)
         if (requestDto.getStatus() != null && !USER_SETTABLE_STATUSES.contains(requestDto.getStatus())) {
             throw new BadRequestException("A new vehicle must be AVAILABLE or OFFLINE");
         }
+        // Registration numbers must be unique (spaces at the ends are ignored)
         String registration = requestDto.getRegistrationNumber().trim();
         if (vehicleRepository.existsByRegistrationNumber(registration)) {
             throw new ConflictException("Vehicle with registration number already exists: " + registration);
         }
-        Vehicle saved = vehicleRepository.save(vehicleMapper.toEntity(requestDto));
+        Vehicle newVehicle = vehicleMapper.toEntity(requestDto);
+        Vehicle saved = vehicleRepository.save(newVehicle);
         log.info("Created vehicle id={}, reg={}", saved.getId(), saved.getRegistrationNumber());
         return vehicleMapper.toDto(saved);
     }
 
     public VehicleResponseDto getVehicle(Long id) {
-        return vehicleMapper.toDto(findVehicleById(id));
+        Vehicle vehicle = findVehicleById(id);
+        return vehicleMapper.toDto(vehicle);
     }
 
     /**
@@ -120,10 +130,12 @@ public class VehicleService {
             throw new ConflictException("Vehicle is deactivated");
         }
         LocalDateTime now = LocalDateTime.now(clock);
+        // 1) Save the new current position on the vehicle itself
         vehicle.setCurrentLatitude(requestDto.getLatitude());
         vehicle.setCurrentLongitude(requestDto.getLongitude());
         vehicle.setLocationUpdatedAt(now);
 
+        // 2) Add a row to the location history, so the vehicle's trail can be shown later
         LocationHistory history = new LocationHistory();
         history.setVehicle(vehicle);
         history.setLatitude(requestDto.getLatitude());
@@ -138,14 +150,26 @@ public class VehicleService {
     /** Location trail of one vehicle, newest first, optionally limited to a time window. */
     public Page<LocationHistoryResponseDto> getLocationHistory(Long id, LocalDateTime from, LocalDateTime to, Pageable pageable) {
         findVehicleById(id); // 404 for unknown vehicles instead of an empty page
-        LocalDateTime start = from != null ? from : LocalDateTime.of(1970, 1, 1, 0, 0);
-        LocalDateTime end = to != null ? to : LocalDateTime.now(clock).plusMinutes(1);
+
+        // No 'from' given: start from the very beginning (1 Jan 1970)
+        LocalDateTime start = LocalDateTime.of(1970, 1, 1, 0, 0);
+        if (from != null) {
+            start = from;
+        }
+        // No 'to' given: go up to now (plus 1 minute, so a ping saved this second is included)
+        LocalDateTime end = LocalDateTime.now(clock).plusMinutes(1);
+        if (to != null) {
+            end = to;
+        }
+
         if (start.isAfter(end)) {
             throw new BadRequestException("'from' must not be after 'to'");
         }
-        return locationHistoryRepository
-                .findByVehicleIdAndRecordedAtBetweenOrderByRecordedAtDesc(id, start, end, pageable)
-                .map(vehicleMapper::toDto);
+        // Spring Data builds this SQL query from the method name: vehicle id, time range, newest first
+        Page<LocationHistory> page = locationHistoryRepository
+                .findByVehicleIdAndRecordedAtBetweenOrderByRecordedAtDesc(id, start, end, pageable);
+        // Page.map converts every row on the page with vehicleMapper.toDto
+        return page.map(vehicleMapper::toDto);
     }
 
     /**
@@ -168,29 +192,36 @@ public class VehicleService {
      * See {@link ProximitySearch} for the bounding-box + Haversine approach.
      */
     public List<NearbyVehicleResponseDto> findNearbyVehicles(double lat, double lon, double radiusKm) {
-        return proximitySearch.nearestAvailable(lat, lon, radiusKm, false).stream()
-            .map(c -> {
-                NearbyVehicleResponseDto dto = new NearbyVehicleResponseDto();
-                dto.setVehicleId(c.vehicle().id());
-                dto.setRegistrationNumber(c.vehicle().registrationNumber());
-                dto.setType(c.vehicle().type().name());
-                dto.setDistanceKm(Math.round(c.distanceKm() * 100.0) / 100.0);
-                dto.setDriverId(c.vehicle().driverId());
-                dto.setLocationUpdatedAt(c.vehicle().locationUpdatedAt());
-                return dto;
-            })
-            .toList();
+        // false = show vehicles even if they have no active driver (this is the dispatcher's map)
+        List<ProximitySearch.Candidate> candidates = proximitySearch.nearestAvailable(lat, lon, radiusKm, false);
+
+        // Turn each search result into the JSON object the API returns
+        List<NearbyVehicleResponseDto> result = new ArrayList<>();
+        for (ProximitySearch.Candidate candidate : candidates) {
+            NearbyVehicleResponseDto dto = new NearbyVehicleResponseDto();
+            dto.setVehicleId(candidate.vehicle().id());
+            dto.setRegistrationNumber(candidate.vehicle().registrationNumber());
+            dto.setType(candidate.vehicle().type().name());
+            dto.setDistanceKm(HaversineCalculator.roundToTwoDecimals(candidate.distanceKm()));
+            dto.setDriverId(candidate.vehicle().driverId());
+            dto.setLocationUpdatedAt(candidate.vehicle().locationUpdatedAt());
+            result.add(dto);
+        }
+        return result;
     }
 
+    /** Normal read, no lock. orElseThrow: return the vehicle if found, otherwise throw a 404 error. */
     public Vehicle findVehicleById(Long id) {
         return vehicleRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + id));
     }
 
+    /** True if some delivery that is ASSIGNED, PICKED_UP or IN_TRANSIT uses this vehicle. */
     private boolean isOnActiveDelivery(Vehicle vehicle) {
         return deliveryRepository.existsByVehicleIdAndStatusIn(vehicle.getId(), DeliveryService.ACTIVE_STATUSES);
     }
 
+    /** Read with SELECT ... FOR UPDATE, so no other transaction can change this row until we finish. */
     Vehicle lockVehicle(Long id) {
         return vehicleRepository.findByIdForUpdate(id)
             .orElseThrow(() -> new ResourceNotFoundException("Vehicle not found with id: " + id));
